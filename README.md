@@ -75,12 +75,11 @@ end
 
 Do not run the assignment unconditionally: a non-interactive subshell can
 re-source the configuration and overwrite a valid inherited value with
-`not a tty`. Leave the inherited value untouched when stdin has no terminal.
+`not a tty`.
 
 For a coding agent's background service, verify that **its GPG request** supplies
 the correct `GPG_TTY`. Guarding shell configuration prevents clobbering an
 inherited value; it does not repair a missing or stale value in an already-running
-service. Setting it in an unrelated shell does not necessarily update that
 service. The wrapper does not guess the terminal. Real GPG tests are not proof of
 end-to-end behavior in every coding agent's service setup.
 
