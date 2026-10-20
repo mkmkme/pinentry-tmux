@@ -784,9 +784,14 @@ fn run(config: Config) -> Result<()> {
 fn main() {
     let args: Vec<_> = env::args().skip(1).collect();
     if args == ["--help"] {
-        println!(
-            "pinentry-tmux [--backend /absolute/pinentry-curses] [--tmux-socket /absolute/socket]\n  [--session-timeout 1..3600] [--tmux-program /absolute/tmux]\n\nLinux only. Requires a /dev/pts GPG_TTY in a tmux session with exactly one client.\nNo automatic fallback outside tmux. Default timeout: 300 seconds."
-        );
+        println!(concat!(
+            "pinentry-tmux [--backend /absolute/pinentry-curses] ",
+            "[--tmux-socket /absolute/socket]\n",
+            "  [--session-timeout 1..3600] [--tmux-program /absolute/tmux]\n\n",
+            "Linux only. Requires a /dev/pts GPG_TTY in a tmux session ",
+            "with exactly one client.\n",
+            "No automatic fallback outside tmux. Default timeout: 300 seconds."
+        ));
         return;
     }
     if args == ["--version"] {
