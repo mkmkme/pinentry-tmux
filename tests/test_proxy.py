@@ -40,7 +40,8 @@ class ProxyTests(unittest.TestCase):
         os.close(self.slave)
         self.temp.cleanup()
 
-    def start(self, timeout=4, *, tmux_socket=None, **scenario):
+    def start(self, timeout=4, *, tmux_socket=None, extra_args=(),
+              greeting=b"OK dummy pinentry\n", **scenario):
         if tmux_socket is not None:
             scenario["expected_socket"] = str(tmux_socket)
         (self.directory / "scenario.json").write_text(json.dumps({"tty": self.tty, **scenario}))
@@ -51,11 +52,12 @@ class ProxyTests(unittest.TestCase):
                 "--session-timeout", str(timeout)]
         if tmux_socket is not None:
             args += ["--tmux-socket", str(tmux_socket)]
+        args.extend(extra_args)
         self.process = subprocess.Popen(
             args,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
             bufsize=0)
-        self.assertEqual(self.line(), b"OK dummy pinentry\n")
+        self.assertEqual(self.line(), greeting)
 
     def line(self):
         value = bytearray()
@@ -319,6 +321,15 @@ class ProxyTests(unittest.TestCase):
         self.assertNotIn(b"untrusted text", stderr)
         self.assertFalse((self.directory / "popup-args.json").exists())
 
+    def test_invalid_cli_terminal_is_rejected_as_greeting(self):
+        self.start(extra_args=["--ttyname", "not a tty - untrusted text"],
+                   greeting=b"ERR 83886179 pinentry-tmux: expected a /dev/pts terminal\n")
+        self.process.wait(timeout=2)
+        stdout, stderr = self.process.communicate(timeout=2)
+        self.assertEqual(self.process.returncode, 1)
+        self.assertEqual(stdout, b"")  # No backend greeting or second error.
+        self.assertNotIn(b"untrusted text", stderr)
+        self.assertFalse((self.directory / "popup-args.json").exists())
 
 
 if __name__ == "__main__":

@@ -93,7 +93,7 @@ impl Config {
                     }
                     config.timeout = Duration::from_secs(seconds);
                 }
-                "--ttyname" => config.original_tty = Some(value.to_owned()),
+                "--ttyname" => config.original_tty = Some(checked_tty(value.as_bytes())?),
                 // gpg-agent can supply --display. Never pass it to curses.
                 "--display" | "--ttytype" | "--lc-ctype" | "--lc-messages" => (),
                 _ => return Err("unsupported command-line option"),
@@ -867,6 +867,39 @@ mod tests {
     fn checked_tty_accepts_an_owned_pseudoterminal() {
         let (_master, _slave, name) = test_terminal();
         assert_eq!(checked_tty(&name).unwrap().as_bytes(), name);
+    }
+
+    #[test]
+    fn config_accepts_a_valid_cli_terminal() {
+        let (_master, _slave, name) = test_terminal();
+        let tty = String::from_utf8(name).unwrap();
+        for args in [
+            vec!["--ttyname".to_owned(), tty.clone()],
+            vec![format!("--ttyname={tty}")],
+        ] {
+            assert_eq!(
+                Config::parse(&args).unwrap().original_tty.as_deref(),
+                Some(tty.as_str())
+            );
+        }
+    }
+
+    #[test]
+    fn config_rejects_invalid_cli_terminals() {
+        for tty in [
+            "not a tty",
+            "/dev/null",
+            "/dev/pts/",
+            "/dev/pts/../0",
+            "/dev/pts/999999999999",
+        ] {
+            for args in [
+                vec!["--ttyname".to_owned(), tty.to_owned()],
+                vec![format!("--ttyname={tty}")],
+            ] {
+                assert!(Config::parse(&args).is_err());
+            }
+        }
     }
 
     #[test]
