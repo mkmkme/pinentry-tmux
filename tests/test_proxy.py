@@ -331,6 +331,15 @@ class ProxyTests(unittest.TestCase):
         self.assertNotIn(b"untrusted text", stderr)
         self.assertFalse((self.directory / "popup-args.json").exists())
 
+    def test_backend_error_greeting_is_relayed_only_once(self):
+        self.start(startup_error=True, greeting=b"ERR 83886254 backend startup rejected\n")
+        self.process.wait(timeout=2)
+        stdout, stderr = self.process.communicate(timeout=2)
+        self.assertEqual(self.process.returncode, 1)
+        self.assertEqual(stdout, b"")  # The backend ERR is already the final reply.
+        self.assertEqual(stderr, b"pinentry-tmux: backend rejected startup\n")
+        self.assertFalse((self.directory / "popup-args.json").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

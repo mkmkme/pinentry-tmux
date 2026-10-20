@@ -8,6 +8,9 @@ import time
 
 scenario = json.loads(Path(__file__).with_name("scenario.json").read_text())
 assert "TEST_ENV_SECRET" not in os.environ
+if scenario.get("startup_error"):
+    print("ERR 83886254 backend startup rejected", flush=True)
+    sys.exit(1)
 tty = None
 print("OK dummy pinentry", flush=True)
 for raw in sys.stdin.buffer:

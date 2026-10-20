@@ -19,6 +19,7 @@ const GPG_ERR_CANCELED: u32 = 83886179;
 const GPG_ERR_TIMEOUT: u32 = 83886142;
 const GPG_ERR_UNKNOWN_OPTION: u32 = 83886254;
 const SESSION_TIMEOUT: &str = "session timed out";
+const STARTUP_REJECTED: &str = "backend rejected startup";
 const DEFAULT_SESSION_TIMEOUT: Duration = Duration::from_secs(300);
 const POPUP_SETUP_TIMEOUT: Duration = Duration::from_secs(10);
 const VALID_TIMEOUT_SECS: std::ops::RangeInclusive<u64> = 1..=3600;
@@ -713,7 +714,7 @@ fn run(config: Config) -> Result<()> {
         popup: None,
     };
     if !session.backend.relay_reply(deadline, &[0])? {
-        return Err("backend rejected startup");
+        return Err(STARTUP_REJECTED);
     }
     let mut original = config.original_tty.clone();
     let mut line = Line::new();
@@ -810,7 +811,8 @@ fn main() {
         // Never include raw protocol input, backend output, or OS errors with
         // untrusted paths in diagnostics. The error type enforces static text.
         eprintln!("pinentry-tmux: {error}");
-        if !is_helper {
+        // A rejected backend greeting was already relayed as the final reply.
+        if !is_helper && error != STARTUP_REJECTED {
             let code = if error == SESSION_TIMEOUT {
                 GPG_ERR_TIMEOUT
             } else {
