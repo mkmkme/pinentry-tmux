@@ -15,7 +15,9 @@ use std::time::{Duration, Instant};
 
 type Result<T> = std::result::Result<T, &'static str>;
 const MAX_LINE: usize = 16 * 1024;
-const CANCEL: &str = "ERR 83886179 pinentry-tmux: operation cancelled\n";
+const GPG_ERR_CANCELED: u32 = 83886179;
+const GPG_ERR_TIMEOUT: u32 = 83886142;
+const SESSION_TIMEOUT: &str = "session timed out";
 static STOP: AtomicBool = AtomicBool::new(false);
 
 extern "C" fn stop(_: libc::c_int) {
@@ -143,7 +145,7 @@ fn check(deadline: Instant) -> Result<()> {
     if STOP.load(Ordering::Relaxed) {
         Err("operation cancelled by signal")
     } else if Instant::now() >= deadline {
-        Err("session timed out")
+        Err(SESSION_TIMEOUT)
     } else {
         Ok(())
     }
@@ -776,9 +778,17 @@ fn main() {
         // untrusted paths in diagnostics. The error type enforces static text.
         eprintln!("pinentry-tmux: {error}");
         if !is_helper {
+            let code = if error == SESSION_TIMEOUT {
+                GPG_ERR_TIMEOUT
+            } else {
+                GPG_ERR_CANCELED
+            };
+            let reply = format!("ERR {code} pinentry-tmux: {error}\n");
+            // Allow a short, bounded final reply even after a handled signal.
+            STOP.store(false, Ordering::Relaxed);
             let _ = write_bytes(
                 1,
-                CANCEL.as_bytes(),
+                reply.as_bytes(),
                 Instant::now() + Duration::from_millis(100),
                 &[],
             );

@@ -78,6 +78,16 @@ does not necessarily update a running service. Missing or stale terminal
 information is not guessed. Real GPG tests are not proof of end-to-end behavior
 in every OpenCode service setup.
 
+### Failure diagnostics
+
+Wrapper errors include a static reason in the Assuan `ERR` reply; timeouts use
+the timeout error code rather than cancellation. These details are useful when
+running the protocol by hand or inspecting agent debug output, but **gpg may
+display only the error code's generic description**, such as "Operation
+cancelled", instead of the reason. A daemonized agent may also discard the
+wrapper's stderr. There is currently no persistent failure log option.
+Avoid sharing agent debug logs without reviewing and redacting sensitive data.
+
 ## Design and security boundaries
 
 1. Start the fixed curses backend on anonymous stdin/stdout pipes, initially

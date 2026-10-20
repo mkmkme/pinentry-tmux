@@ -186,7 +186,7 @@ class ProxyTests(unittest.TestCase):
         self.start(timeout=1, no_connect=True)
         self.setup_tty()
         self.send(b"GETPIN\n")
-        self.assertTrue(self.line().startswith(b"ERR "))
+        self.assertEqual(self.line(), b"ERR 83886142 pinentry-tmux: session timed out\n")
         self.process.communicate(timeout=2)
         self.assertEqual(self.process.returncode, 1)
 
@@ -218,7 +218,7 @@ class ProxyTests(unittest.TestCase):
         self.start(ambiguous=True)
         self.setup_tty()
         self.send(b"GETPIN\n")
-        self.assertTrue(self.line().startswith(b"ERR "))
+        self.assertEqual(self.line(), b"ERR 83886179 pinentry-tmux: need exactly one attached tmux client for the signing pane's session\n")
         self.process.communicate(timeout=2)
         self.assertFalse((self.directory / "popup-args.json").exists())
 
@@ -234,7 +234,7 @@ class ProxyTests(unittest.TestCase):
         self.start(timeout=2, stall=True)
         self.setup_tty()
         self.send(b"GETPIN\n")
-        self.assertTrue(self.line().startswith(b"ERR "))
+        self.assertEqual(self.line(), b"ERR 83886142 pinentry-tmux: session timed out\n")
         self.process.communicate(timeout=3)
         self.assertEqual(self.process.returncode, 1)
 
@@ -252,7 +252,9 @@ class ProxyTests(unittest.TestCase):
         self.send(b"GETPIN\n")
         time.sleep(0.3)
         self.process.send_signal(signal.SIGTERM)
-        self.process.communicate(timeout=2)
+        self.process.wait(timeout=2)  # Keep agent stdin open until the signal is handled.
+        stdout, _ = self.process.communicate(timeout=2)
+        self.assertEqual(stdout, b"ERR 83886179 pinentry-tmux: operation cancelled by signal\n")
         self.assertEqual(self.process.returncode, 1)
 
     def test_agent_eof_terminates_blocked_backend(self):
@@ -285,6 +287,15 @@ class ProxyTests(unittest.TestCase):
         # Inspect while the wrapper is still running: cleanup cannot mask a
         # modification that would survive SIGKILL or an aborting panic.
         self.assertEqual(fcntl.fcntl(self.slave, fcntl.F_GETFL), flags)
+
+    def test_invalid_inherited_terminal_is_not_echoed(self):
+        self.start()
+        self.send(b"OPTION ttyname=not a tty - untrusted text\n")
+        self.assertEqual(self.line(), b"ERR 83886179 pinentry-tmux: expected a /dev/pts terminal\n")
+        _, stderr = self.process.communicate(timeout=2)
+        self.assertNotIn(b"untrusted text", stderr)
+        self.assertFalse((self.directory / "popup-args.json").exists())
+
 
 
 if __name__ == "__main__":
