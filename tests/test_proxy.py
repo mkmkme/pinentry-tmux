@@ -45,14 +45,12 @@ class ProxyTests(unittest.TestCase):
             scenario["expected_socket"] = str(tmux_socket)
         (self.directory / "scenario.json").write_text(json.dumps({"tty": self.tty, **scenario}))
         env = {**os.environ, "TEST_ENV_SECRET": "do-not-forward-this"}
-        options = [("--backend", str(self.directory / "fake_pinentry.py")),
-                   ("--tmux-program", str(self.directory / "fake_tmux.py")),
-                   ("--session-timeout", str(timeout))]
+        args = [str(BINARY),
+                "--backend", str(self.directory / "fake_pinentry.py"),
+                "--tmux-program", str(self.directory / "fake_tmux.py"),
+                "--session-timeout", str(timeout)]
         if tmux_socket is not None:
-            options.append(("--tmux-socket", str(tmux_socket)))
-        args = [str(BINARY)]
-        for key, value in options:
-            args.extend([key, value])
+            args += ["--tmux-socket", str(tmux_socket)]
         self.process = subprocess.Popen(
             args,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
