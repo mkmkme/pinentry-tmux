@@ -2,7 +2,7 @@
 
 A small Linux/Rust proxy that runs `/usr/bin/pinentry-curses` in a separate,
 explicitly targeted tmux popup. Intended to avoid pinentry corrupting an
-OpenCode (or other full-screen application's) terminal.
+OpenCode, Claude Code, Codex, or another full-screen application's terminal.
 
 Independently written, informed by the design and pitfalls of
 [eth-p/pinentry-tmux](https://github.com/eth-p/pinentry-tmux) and the
@@ -11,7 +11,7 @@ No source code from those projects is incorporated.
 
 ## Requirements
 
-- Linux, tmux with popup support (tested: 3.4), and curses pinentry
+- Linux, tmux **3.3 or newer** (`display-popup -T`; tested: 3.4), and curses pinentry
   (tested: 1.2.1).
 - Rust **1.85 or newer** to build; `rust-toolchain.toml` selects stable for
   development. One dependency:
@@ -19,7 +19,7 @@ No source code from those projects is incorporated.
   or Python runtime. It dynamically links the system C library.
 - `just` for build recipes; Python 3 and GnuPG for tests only.
 - GPG must supply `OPTION ttyname` naming the signing shell's tmux pane.
-  Normally this comes from `export GPG_TTY="$(tty)"` in that shell.
+  See the guarded `GPG_TTY` setup below.
 - Exactly **one non-control client** must be attached across the sessions
   containing that pane. Ambiguous or detached sessions fail closed.
 
@@ -55,6 +55,35 @@ can restore it and reload the agent to revert. Do not add multiple directives.
 uncached operations outside tmux will also fail. It never automatically falls
 back to drawing on another terminal or silently skips commit signing.
 
+### Set GPG_TTY only when a terminal is available
+
+In Bash or Zsh shell configuration:
+
+```sh
+if [ -t 0 ]; then
+    export GPG_TTY="$(tty)"
+fi
+```
+
+In fish:
+
+```fish
+if isatty stdin
+    set -gx GPG_TTY (tty)
+end
+```
+
+Do not run the assignment unconditionally: a non-interactive subshell can
+re-source the configuration and overwrite a valid inherited value with
+`not a tty`. Leave the inherited value untouched when stdin has no terminal.
+
+For a coding agent's background service, verify that **its GPG request** supplies
+the correct `GPG_TTY`. Guarding shell configuration prevents clobbering an
+inherited value; it does not repair a missing or stale value in an already-running
+service. Setting it in an unrelated shell does not necessarily update that
+service. The wrapper does not guess the terminal. Real GPG tests are not proof of
+end-to-end behavior in every coding agent's service setup.
+
 ### Options / non-default tmux server
 
 ```text
@@ -72,11 +101,14 @@ launcher containing an `exec` of the installed binary with the appropriate
 The wrapper deliberately does not trust an inherited, potentially stale `TMUX`
 variable from a long-running GPG agent.
 
-If OpenCode runs tool commands through a background service, verify that **its
-GPG request** supplies the correct `GPG_TTY`. Setting it in an unrelated shell
-does not necessarily update a running service. Missing or stale terminal
-information is not guessed. Real GPG tests are not proof of end-to-end behavior
-in every OpenCode service setup.
+### Unsupported popup setups
+
+- Signing from a shell inside another tmux popup is unsupported: its terminal
+  is not listed by `list-panes`, so routing fails.
+- tmux permits only one popup per client. If a popup is already open on the
+  selected client, the pinentry popup cannot be opened there.
+
+These situations fail closed instead of falling back to the original terminal.
 
 ### Failure diagnostics
 
