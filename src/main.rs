@@ -13,7 +13,7 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-type Result<T> = std::result::Result<T, String>;
+type Result<T> = std::result::Result<T, &'static str>;
 const MAX_LINE: usize = 16 * 1024;
 const CANCEL: &str = "ERR 83886179 pinentry-tmux: operation cancelled\n";
 static STOP: AtomicBool = AtomicBool::new(false);
@@ -32,7 +32,7 @@ fn harden() -> Result<()> {
         if libc::setrlimit(libc::RLIMIT_CORE, &limit) != 0
             || libc::prctl(libc::PR_SET_DUMPABLE, 0) != 0
         {
-            return Err("cannot disable core dumps/process inspection".into());
+            return Err("cannot disable core dumps/process inspection");
         }
         libc::umask(0o077);
         let mut action: libc::sigaction = std::mem::zeroed();
@@ -40,7 +40,7 @@ fn harden() -> Result<()> {
         libc::sigemptyset(&mut action.sa_mask);
         for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
             if libc::sigaction(signal, &action, std::ptr::null_mut()) != 0 {
-                return Err("cannot install signal handler".into());
+                return Err("cannot install signal handler");
             }
         }
     }
@@ -83,14 +83,14 @@ impl Config {
                 "--session-timeout" => {
                     let seconds: u64 = value.parse().map_err(|_| "invalid timeout")?;
                     if !(1..=3600).contains(&seconds) {
-                        return Err("timeout must be 1..3600 seconds".into());
+                        return Err("timeout must be 1..3600 seconds");
                     }
                     config.timeout = Duration::from_secs(seconds);
                 }
                 "--ttyname" => config.original_tty = Some(value.to_owned()),
                 // gpg-agent can supply --display. Never pass it to curses.
                 "--display" | "--ttytype" | "--lc-ctype" | "--lc-messages" => (),
-                _ => return Err("unsupported command-line option".into()),
+                _ => return Err("unsupported command-line option"),
             }
             i += 1;
         }
@@ -98,7 +98,7 @@ impl Config {
             || !config.tmux.is_absolute()
             || config.socket.as_ref().is_some_and(|p| !p.is_absolute())
         {
-            return Err("executable and socket paths must be absolute".into());
+            return Err("executable and socket paths must be absolute");
         }
         Ok(config)
     }
@@ -141,9 +141,9 @@ impl Drop for Process {
 
 fn check(deadline: Instant) -> Result<()> {
     if STOP.load(Ordering::Relaxed) {
-        Err("operation cancelled by signal".into())
+        Err("operation cancelled by signal")
     } else if Instant::now() >= deadline {
-        Err("session timed out".into())
+        Err("session timed out")
     } else {
         Ok(())
     }
@@ -177,14 +177,14 @@ fn wait(fd: RawFd, events: i16, deadline: Instant, guards: &[RawFd]) -> Result<(
             if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
                 continue;
             }
-            return Err("poll failed".into());
+            return Err("poll failed");
         }
         if fds
             .iter()
             .skip(1)
             .any(|p| p.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0)
         {
-            return Err("agent or popup disconnected".into());
+            return Err("agent or popup disconnected");
         }
         if fds[0].revents != 0 {
             return Ok(());
@@ -196,7 +196,7 @@ fn nonblocking(fd: RawFd) -> Result<()> {
     unsafe {
         let flags = libc::fcntl(fd, libc::F_GETFL);
         if flags < 0 || libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0 {
-            return Err("cannot set nonblocking descriptor".into());
+            return Err("cannot set nonblocking descriptor");
         }
     }
     Ok(())
@@ -210,11 +210,11 @@ fn write_bytes(fd: RawFd, bytes: &[u8], deadline: Instant, guards: &[RawFd]) -> 
         if count > 0 {
             remaining = &remaining[count as usize..];
         } else if count == 0 {
-            return Err("closed output".into());
+            return Err("closed output");
         } else {
             match io::Error::last_os_error().kind() {
                 io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted => (),
-                _ => return Err("output disconnected".into()),
+                _ => return Err("output disconnected"),
             }
         }
     }
@@ -242,7 +242,7 @@ impl Line {
         loop {
             wait(fd, libc::POLLIN, deadline, guards)?;
             if self.len == MAX_LINE {
-                return Err("protocol line too long".into());
+                return Err("protocol line too long");
             }
             // Read one byte to avoid retaining a second copy or consuming the
             // next protocol message. Pinentry messages are normally very short.
@@ -251,18 +251,18 @@ impl Line {
                 return if self.len == 0 {
                     Ok(false)
                 } else {
-                    Err("truncated protocol line".into())
+                    Err("truncated protocol line")
                 };
             }
             if count < 0 {
                 match io::Error::last_os_error().kind() {
                     io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted => continue,
-                    _ => return Err("input disconnected".into()),
+                    _ => return Err("input disconnected"),
                 }
             }
             self.len += 1;
             if self.bytes[self.len - 1] == 0 {
-                return Err("NUL in protocol line".into());
+                return Err("NUL in protocol line");
             }
             if self.bytes[self.len - 1] == b'\n' {
                 return Ok(true);
@@ -315,11 +315,11 @@ fn checked_tty(value: &[u8]) -> Result<String> {
         || !value[9..].bytes().all(|b| b.is_ascii_digit())
         || value.len() <= 9
     {
-        return Err("expected a /dev/pts terminal".into());
+        return Err("expected a /dev/pts terminal");
     }
     let metadata = fs::metadata(value).map_err(|_| "terminal is unavailable")?;
     if !metadata.file_type().is_char_device() || metadata.uid() != unsafe { libc::geteuid() } {
-        return Err("terminal is not owned by this user".into());
+        return Err("terminal is not owned by this user");
     }
     Ok(value.into())
 }
@@ -335,7 +335,7 @@ fn choose_target(panes: &str, clients: &str, tty: &str) -> Result<(String, Strin
         }
     }
     if pane_ids.len() != 1 {
-        return Err("original terminal is not a unique tmux pane".into());
+        return Err("original terminal is not a unique tmux pane");
     }
     let mut matches = BTreeSet::new();
     for line in clients.lines() {
@@ -345,7 +345,7 @@ fn choose_target(panes: &str, clients: &str, tty: &str) -> Result<(String, Strin
         }
     }
     if matches.len() != 1 {
-        return Err("need exactly one attached tmux client for the signing pane's session".into());
+        return Err("need exactly one attached tmux client for the signing pane's session");
     }
     Ok((
         matches.first().unwrap().to_string(),
@@ -368,7 +368,7 @@ fn query(config: &Config, args: &[&str], deadline: Instant) -> Result<String> {
     let mut output = Vec::new();
     while line.read(stdout.as_raw_fd(), deadline, &[0])? {
         if output.len() + line.len > 1024 * 1024 {
-            return Err("tmux query output too large".into());
+            return Err("tmux query output too large");
         }
         output.extend_from_slice(line.data());
     }
@@ -376,13 +376,13 @@ fn query(config: &Config, args: &[&str], deadline: Instant) -> Result<String> {
         check(deadline)?;
         if let Some(status) = child.0.try_wait().map_err(|_| "cannot wait for tmux")? {
             if !status.success() {
-                return Err("tmux query failed; check the server socket".into());
+                return Err("tmux query failed; check the server socket");
             }
             break;
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    String::from_utf8(output).map_err(|_| "invalid tmux query output".into())
+    String::from_utf8(output).map_err(|_| "invalid tmux query output")
 }
 
 struct PrivateDir(PathBuf);
@@ -391,7 +391,7 @@ impl PrivateDir {
         // mkdtemp atomically creates mode 0700. TMPDIR is deliberately ignored.
         let mut template = b"/tmp/pinentry-tmux-XXXXXX\0".to_vec();
         if unsafe { libc::mkdtemp(template.as_mut_ptr().cast()) }.is_null() {
-            return Err("cannot create private directory".into());
+            return Err("cannot create private directory");
         }
         template.pop();
         Ok(Self(String::from_utf8(template).unwrap().into()))
@@ -478,7 +478,7 @@ impl Popup {
                 .map_err(|_| "cannot wait for popup")?
                 .is_some()
             {
-                return Err("tmux popup failed or was closed".into());
+                return Err("tmux popup failed or was closed");
             }
             check(setup_deadline)?;
             match listener.accept() {
@@ -501,17 +501,17 @@ impl Popup {
                         libc::poll(fds.as_mut_ptr(), 2, 50);
                     }
                     if fds[1].revents != 0 {
-                        return Err("agent disconnected during popup setup".into());
+                        return Err("agent disconnected during popup setup");
                     }
                 }
-                Err(_) => return Err("cannot accept popup connection".into()),
+                Err(_) => return Err("cannot accept popup connection"),
             }
         };
         verify_peer(&connection, None)?;
         nonblocking(connection.as_raw_fd())?;
         let mut line = Line::new();
         if !line.read(connection.as_raw_fd(), setup_deadline, &[0])? {
-            return Err("popup closed during setup".into());
+            return Err("popup closed during setup");
         }
         let text = std::str::from_utf8(line.data())
             .map_err(|_| "invalid popup metadata")?
@@ -524,7 +524,7 @@ impl Popup {
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b"-_.+".contains(&b))
         {
-            return Err("invalid popup terminal type".into());
+            return Err("invalid popup terminal type");
         }
         Ok(Self {
             connection,
@@ -552,23 +552,23 @@ fn verify_peer(stream: &UnixStream, expected_pid: Option<u32>) -> Result<()> {
         || credentials.uid != unsafe { libc::geteuid() }
         || expected_pid.is_some_and(|pid| credentials.pid as u32 != pid)
     {
-        return Err("unexpected popup peer".into());
+        return Err("unexpected popup peer");
     }
     Ok(())
 }
 
 fn helper(args: &[String]) -> Result<()> {
     if args.len() != 3 {
-        return Err("invalid popup invocation".into());
+        return Err("invalid popup invocation");
     }
     let pid: u32 = args[1].parse().map_err(|_| "invalid parent PID")?;
     let seconds: u64 = args[2].parse().map_err(|_| "invalid timeout")?;
     if !(1..=3600).contains(&seconds) {
-        return Err("invalid timeout".into());
+        return Err("invalid timeout");
     }
     let mut tty = [0 as libc::c_char; 256];
     if unsafe { libc::ttyname_r(0, tty.as_mut_ptr(), tty.len()) } != 0 {
-        return Err("popup has no terminal".into());
+        return Err("popup has no terminal");
     }
     let tty = unsafe { std::ffi::CStr::from_ptr(tty.as_ptr()) }
         .to_str()
@@ -628,19 +628,19 @@ impl Backend {
         let mut line = Line::new();
         loop {
             if !line.read(self.output.as_raw_fd(), deadline, guards)? {
-                return Err("curses backend exited".into());
+                return Err("curses backend exited");
             }
             if forward {
                 write_bytes(1, line.data(), deadline, guards)?;
             }
             if keyword(line.data(), b"INQUIRE") {
                 if !forward {
-                    return Err("unexpected backend inquiry".into());
+                    return Err("unexpected backend inquiry");
                 }
                 let mut answer = Line::new();
                 loop {
                     if !answer.read(0, deadline, guards)? {
-                        return Err("agent disconnected during inquiry".into());
+                        return Err("agent disconnected during inquiry");
                     }
                     self.send(answer.data(), deadline, guards)?;
                     if keyword(answer.data(), b"END")
@@ -659,7 +659,7 @@ impl Backend {
     fn setup(&self, command: &[u8], deadline: Instant, guards: &[RawFd]) -> Result<()> {
         self.send(command, deadline, guards)?;
         if !self.response(deadline, guards, false)? {
-            return Err("backend rejected popup terminal".into());
+            return Err("backend rejected popup terminal");
         }
         Ok(())
     }
@@ -686,7 +686,7 @@ fn run(config: Config) -> Result<()> {
         popup: None,
     };
     if !session.backend.response(deadline, &[0], true)? {
-        return Err("backend rejected startup".into());
+        return Err("backend rejected startup");
     }
     let mut original = config.original_tty.clone();
     let mut line = Line::new();
@@ -704,7 +704,7 @@ fn run(config: Config) -> Result<()> {
         }
         if let Some(tty) = option(line.data(), b"ttyname") {
             if session.popup.is_some() {
-                return Err("cannot retarget an active popup".into());
+                return Err("cannot retarget an active popup");
             }
             original = Some(checked_tty(tty)?);
             write_bytes(1, b"OK\n", deadline, &guards)?;
@@ -773,7 +773,7 @@ fn main() {
     });
     if let Err(error) = result {
         // Never include raw protocol input, backend output, or OS errors with
-        // untrusted paths in diagnostics. Error text above is static.
+        // untrusted paths in diagnostics. The error type enforces static text.
         eprintln!("pinentry-tmux: {error}");
         if !is_helper {
             let _ = write_bytes(
