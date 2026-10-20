@@ -149,8 +149,8 @@ fn check(deadline: Instant) -> Result<()> {
     }
 }
 
-/// All descriptors are nonblocking. Polling is bounded, including writes to a
-/// stalled agent. Popup closure and agent EOF cancel a blocked backend promptly.
+/// Pipes and sockets are nonblocking; terminal flags are never changed. Polling
+/// bounds waits and notices agent EOF or popup closure during backend requests.
 fn wait(fd: RawFd, events: i16, deadline: Instant, guards: &[RawFd]) -> Result<()> {
     loop {
         check(deadline)?;
@@ -673,8 +673,13 @@ struct Session {
 }
 
 fn run(config: Config) -> Result<()> {
-    nonblocking(0)?;
-    nonblocking(1)?;
+    for fd in [0, 1] {
+        // O_NONBLOCK belongs to the shared open file description, so changing
+        // a terminal here would also affect the shell, even after SIGKILL.
+        if unsafe { libc::isatty(fd) } == 0 {
+            nonblocking(fd)?;
+        }
+    }
     let deadline = Instant::now() + config.timeout;
     let mut session = Session {
         backend: Backend::start(&config)?,

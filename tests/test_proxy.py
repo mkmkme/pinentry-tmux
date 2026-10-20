@@ -3,6 +3,7 @@
 Run: python3 -m unittest discover -s tests -v
 Build first with cargo build. PINENTRY_TMUX_BINARY can select a release binary.
 """
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -270,6 +271,20 @@ class ProxyTests(unittest.TestCase):
         self.assertTrue(self.line().startswith(b"ERR "))
         self.process.communicate(timeout=2)
         self.assertEqual(self.process.returncode, 1)
+
+    def test_interactive_protocol_leaves_terminal_flags_untouched(self):
+        (self.directory / "scenario.json").write_text(json.dumps({"tty": self.tty}))
+        flags = fcntl.fcntl(self.slave, fcntl.F_GETFL)
+        self.assertFalse(flags & os.O_NONBLOCK)
+        self.process = subprocess.Popen(
+            [str(BINARY), "--backend", str(self.directory / "fake_pinentry.py")],
+            stdin=self.slave, stdout=self.slave, stderr=subprocess.PIPE)
+        ready, _, _ = select.select([self.master], [], [], 2)
+        self.assertTrue(ready, "wrapper did not greet the interactive terminal")
+        self.assertIn(b"OK dummy pinentry", os.read(self.master, 1024))
+        # Inspect while the wrapper is still running: cleanup cannot mask a
+        # modification that would survive SIGKILL or an aborting panic.
+        self.assertEqual(fcntl.fcntl(self.slave, fcntl.F_GETFL), flags)
 
 
 if __name__ == "__main__":
