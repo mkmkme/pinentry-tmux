@@ -128,9 +128,12 @@ Avoid sharing agent debug logs without reviewing and redacting sensitive data.
    case-insensitivity. Reject Emacs redirection. No protocol debugging/logging.
 3. On the first GETPIN, CONFIRM, or MESSAGE, locate the original tty's pane and
    its unique attached client. Explicitly target both client and pane.
-4. Atomically create a mode-0700 directory and mode-0600 Unix socket. The popup
-   helper exchanges **only terminal metadata**, never passphrases. Linux peer
-   credentials verify the UID; the helper also verifies the parent PID.
+4. Create a private mode-0700 directory under `/tmp` (`TMPDIR` is ignored) holding
+   a mode-0600 Unix socket. A fixed, short base avoids depending on the agent's
+   inherited environment and keeps socket paths short. The popup helper exchanges
+   **only terminal metadata** over it, never passphrases. Both ends check Linux
+   peer credentials: the same user on each side, and the helper also requires its
+   connection to be with the proxy process that launched the popup.
 5. Direct curses to the popup terminal. Passphrase replies stay on anonymous
    pipes between backend, proxy, and agent: not disk, argv, environment, or
    the tmux control channel. Obviously, curses display/input uses tmux itself.
