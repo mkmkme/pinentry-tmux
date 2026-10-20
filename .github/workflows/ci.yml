@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Build and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y just tmux gnupg gpg-agent pinentry-curses python3
+      - name: Set up stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Check and test
+        run: just test
+      - name: Release build and isolated tmux/GPG tests
+        run: just test-real
+
+  compatibility:
+    name: Rust 1.85 and ARM64 check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Set up minimum Rust toolchain
+        uses: dtolnay/rust-toolchain@1.85.0
+        with:
+          targets: aarch64-unknown-linux-gnu
+      - name: Test on minimum Rust version
+        run: cargo +1.85.0 test --locked
+      - name: Cross-check ARM64 tests
+        run: cargo +1.85.0 check --locked --tests --target aarch64-unknown-linux-gnu
