@@ -645,10 +645,7 @@ impl Backend {
                         return Err("agent disconnected during inquiry");
                     }
                     self.send(answer.data(), deadline, guards)?;
-                    if keyword(answer.data(), b"END")
-                        || keyword(answer.data(), b"CAN")
-                        || keyword(answer.data(), b"ERR")
-                    {
+                    if keyword(answer.data(), b"END") || keyword(answer.data(), b"CAN") {
                         break;
                     }
                 }

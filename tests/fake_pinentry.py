@@ -23,7 +23,7 @@ for raw in sys.stdin.buffer:
         if scenario.get("inquire"):
             print("INQUIRE QUALITY dummy%25secret", flush=True)
             first = sys.stdin.buffer.readline()
-            if not first.startswith((b"CAN", b"ERR", b"END")):
+            if not first.startswith((b"CAN", b"END")):
                 assert first == b"D 100\n"
                 assert sys.stdin.buffer.readline() == b"END\n"
         if scenario.get("cancel"):

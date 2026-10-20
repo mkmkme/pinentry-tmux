@@ -116,12 +116,12 @@ class ProxyTests(unittest.TestCase):
         self.assertEqual(self.line(), b"ERR 83886179 cancelled\n")
         self.finish()
 
-    def test_inquiry_error_terminates_inquiry(self):
+    def test_inquiry_can_ends_reply(self):
         self.start(inquire=True)
         self.setup_tty()
         self.send(b"GETPIN\n")
         self.assertEqual(self.line(), b"INQUIRE QUALITY dummy%25secret\n")
-        self.send(b"ERR 83886179 cancelled\n")
+        self.send(b"CAN\n")
         self.assertEqual(self.line(), b"D dummy%25secret\n")
         self.assertEqual(self.line(), b"OK\n")
         self.finish()
