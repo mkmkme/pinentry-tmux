@@ -13,7 +13,8 @@ No source code from those projects is incorporated.
 
 - Linux, tmux with popup support (tested: 3.4), and curses pinentry
   (tested: 1.2.1).
-- Rust stable (**1.99.1** here), selected in `rust-toolchain.toml`, to build. One dependency:
+- Rust **1.85 or newer** to build; `rust-toolchain.toml` selects stable for
+  development. One dependency:
   `libc`, pinned through `Cargo.lock`. The executable needs no Rust installation
   or Python runtime. It dynamically links the system C library.
 - `just` for build recipes; Python 3 and GnuPG for tests only.

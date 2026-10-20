@@ -21,7 +21,7 @@ BINARY = Path(os.environ.get("PINENTRY_TMUX_BINARY", ROOT / "target/debug/pinent
 
 class ProxyTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="proxy-test-", dir="/tmp/opencode")
+        self.temp = tempfile.TemporaryDirectory(prefix="proxy-test-")
         self.directory = Path(self.temp.name)
         self.master, self.slave = pty.openpty()
         self.tty = os.ttyname(self.slave)

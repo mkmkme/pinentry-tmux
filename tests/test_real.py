@@ -24,7 +24,7 @@ BINARY = Path(os.environ.get("PINENTRY_TMUX_BINARY", ROOT / "target/debug/pinent
 @unittest.skipUnless(os.environ.get("PINENTRY_TMUX_REAL_TESTS") == "1", "opt-in real GPG/tmux test")
 class RealTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="pe-real-", dir="/tmp/opencode")
+        self.temp = tempfile.TemporaryDirectory(prefix="pe-real-")
         self.directory = Path(self.temp.name)
         self.home = self.directory / "gnupg"
         self.home.mkdir(mode=0o700)

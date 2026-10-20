@@ -566,7 +566,7 @@ fn helper(args: &[String]) -> Result<()> {
     if !(1..=3600).contains(&seconds) {
         return Err("invalid timeout".into());
     }
-    let mut tty = [0_i8; 256];
+    let mut tty = [0 as libc::c_char; 256];
     if unsafe { libc::ttyname_r(0, tty.as_mut_ptr(), tty.len()) } != 0 {
         return Err("popup has no terminal".into());
     }
