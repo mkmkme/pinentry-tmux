@@ -10,8 +10,11 @@ import time
 
 config = json.loads(Path(__file__).with_name("scenario.json").read_text())
 args = sys.argv[1:]
+socket = None
 if args[:1] == ["-S"]:
+    socket = args[1]
     args = args[2:]
+assert socket == config.get("expected_socket"), "incorrect tmux server socket"
 if args[0] == "list-panes":
     print(f"{config['tty']}\t%1\t$1")
 elif args[0] == "list-clients":

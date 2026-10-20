@@ -17,7 +17,11 @@ type Result<T> = std::result::Result<T, &'static str>;
 const MAX_LINE: usize = 16 * 1024;
 const GPG_ERR_CANCELED: u32 = 83886179;
 const GPG_ERR_TIMEOUT: u32 = 83886142;
+const GPG_ERR_UNKNOWN_OPTION: u32 = 83886254;
 const SESSION_TIMEOUT: &str = "session timed out";
+const DEFAULT_SESSION_TIMEOUT: Duration = Duration::from_secs(300);
+const POPUP_SETUP_TIMEOUT: Duration = Duration::from_secs(10);
+const VALID_TIMEOUT_SECS: std::ops::RangeInclusive<u64> = 1..=3600;
 static STOP: AtomicBool = AtomicBool::new(false);
 
 extern "C" fn stop(_: libc::c_int) {
@@ -63,7 +67,7 @@ impl Config {
             backend: "/usr/bin/pinentry-curses".into(),
             tmux: "/usr/bin/tmux".into(),
             socket: None,
-            timeout: Duration::from_secs(300),
+            timeout: DEFAULT_SESSION_TIMEOUT,
             original_tty: None,
         };
         let mut i = 0;
@@ -84,7 +88,7 @@ impl Config {
                 "--tmux-socket" => config.socket = Some(value.into()),
                 "--session-timeout" => {
                     let seconds: u64 = value.parse().map_err(|_| "invalid timeout")?;
-                    if !(1..=3600).contains(&seconds) {
+                    if !VALID_TIMEOUT_SECS.contains(&seconds) {
                         return Err("timeout must be 1..3600 seconds");
                     }
                     config.timeout = Duration::from_secs(seconds);
@@ -141,7 +145,7 @@ impl Drop for Process {
     }
 }
 
-fn check(deadline: Instant) -> Result<()> {
+fn check_deadline(deadline: Instant) -> Result<()> {
     if STOP.load(Ordering::Relaxed) {
         Err("operation cancelled by signal")
     } else if Instant::now() >= deadline {
@@ -153,45 +157,48 @@ fn check(deadline: Instant) -> Result<()> {
 
 /// Pipes and sockets are nonblocking; terminal flags are never changed. Polling
 /// bounds waits and notices agent EOF or popup closure during backend requests.
-fn wait(fd: RawFd, events: i16, deadline: Instant, guards: &[RawFd]) -> Result<()> {
-    loop {
-        check(deadline)?;
-        let mut fds = vec![libc::pollfd {
-            fd,
-            events,
-            revents: 0,
-        }];
-        for &guard in guards {
-            if guard != fd {
-                fds.push(libc::pollfd {
-                    fd: guard,
-                    events: 0,
-                    revents: 0,
-                });
-            }
-        }
-        let timeout = deadline
-            .saturating_duration_since(Instant::now())
-            .as_millis()
-            .min(100) as i32;
-        let count = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, timeout) };
-        if count < 0 {
-            if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err("poll failed");
-        }
-        if fds
-            .iter()
-            .skip(1)
-            .any(|p| p.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0)
-        {
-            return Err("agent or popup disconnected");
-        }
-        if fds[0].revents != 0 {
-            return Ok(());
+fn poll_ready(fd: RawFd, events: i16, deadline: Instant, guards: &[RawFd]) -> Result<()> {
+    while !poll_once(fd, events, deadline, guards)? {}
+    Ok(())
+}
+
+/// Poll once so callers with a child process can also check its exit status.
+fn poll_once(fd: RawFd, events: i16, deadline: Instant, guards: &[RawFd]) -> Result<bool> {
+    check_deadline(deadline)?;
+    let mut fds = vec![libc::pollfd {
+        fd,
+        events,
+        revents: 0,
+    }];
+    for &guard in guards {
+        if guard != fd {
+            fds.push(libc::pollfd {
+                fd: guard,
+                events: 0,
+                revents: 0,
+            });
         }
     }
+    let timeout = deadline
+        .saturating_duration_since(Instant::now())
+        .as_millis()
+        .min(100) as i32;
+    let count = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, timeout) };
+    if count < 0 {
+        return if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+            Ok(false)
+        } else {
+            Err("poll failed")
+        };
+    }
+    if fds
+        .iter()
+        .skip(1)
+        .any(|p| p.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0)
+    {
+        return Err("agent or popup disconnected");
+    }
+    Ok(fds[0].revents != 0)
 }
 
 fn nonblocking(fd: RawFd) -> Result<()> {
@@ -207,7 +214,7 @@ fn nonblocking(fd: RawFd) -> Result<()> {
 fn write_bytes(fd: RawFd, bytes: &[u8], deadline: Instant, guards: &[RawFd]) -> Result<()> {
     let mut remaining = bytes;
     while !remaining.is_empty() {
-        wait(fd, libc::POLLOUT, deadline, guards)?;
+        poll_ready(fd, libc::POLLOUT, deadline, guards)?;
         let count = unsafe { libc::write(fd, remaining.as_ptr().cast(), remaining.len()) };
         if count > 0 {
             remaining = &remaining[count as usize..];
@@ -242,7 +249,7 @@ impl Line {
         wipe(&mut self.bytes);
         self.len = 0;
         loop {
-            wait(fd, libc::POLLIN, deadline, guards)?;
+            poll_ready(fd, libc::POLLIN, deadline, guards)?;
             if self.len == MAX_LINE {
                 return Err("protocol line too long");
             }
@@ -289,11 +296,11 @@ fn keyword(line: &[u8], word: &[u8]) -> bool {
         && line.get(word.len()).is_none_or(|b| b.is_ascii_whitespace())
 }
 
-fn terminal(line: &[u8]) -> bool {
+fn is_final_reply(line: &[u8]) -> bool {
     keyword(line, b"OK") || keyword(line, b"ERR")
 }
 
-fn option<'a>(line: &'a [u8], name: &[u8]) -> Option<&'a [u8]> {
+fn parse_option<'a>(line: &'a [u8], name: &[u8]) -> Option<&'a [u8]> {
     if !keyword(line, b"OPTION") {
         return None;
     }
@@ -313,10 +320,10 @@ fn option<'a>(line: &'a [u8], name: &[u8]) -> Option<&'a [u8]> {
 
 fn checked_tty(value: &[u8]) -> Result<String> {
     let value = std::str::from_utf8(value).map_err(|_| "invalid terminal")?;
-    if !value.starts_with("/dev/pts/")
-        || !value[9..].bytes().all(|b| b.is_ascii_digit())
-        || value.len() <= 9
-    {
+    let number = value
+        .strip_prefix("/dev/pts/")
+        .ok_or("expected a /dev/pts terminal")?;
+    if number.is_empty() || !number.bytes().all(|b| b.is_ascii_digit()) {
         return Err("expected a /dev/pts terminal");
     }
     let metadata = fs::metadata(value).map_err(|_| "terminal is unavailable")?;
@@ -375,7 +382,7 @@ fn query(config: &Config, args: &[&str], deadline: Instant) -> Result<String> {
         output.extend_from_slice(line.data());
     }
     loop {
-        check(deadline)?;
+        check_deadline(deadline)?;
         if let Some(status) = child.0.try_wait().map_err(|_| "cannot wait for tmux")? {
             if !status.success() {
                 return Err("tmux query failed; check the server socket");
@@ -417,27 +424,8 @@ struct Popup {
 
 impl Popup {
     fn open(config: &Config, original: &str, deadline: Instant) -> Result<Self> {
-        let setup_deadline = deadline.min(Instant::now() + Duration::from_secs(10));
-        let panes = query(
-            config,
-            &[
-                "list-panes",
-                "-a",
-                "-F",
-                "#{pane_tty}\t#{pane_id}\t#{session_id}",
-            ],
-            setup_deadline,
-        )?;
-        let clients = query(
-            config,
-            &[
-                "list-clients",
-                "-F",
-                "#{client_name}\t#{session_id}\t#{client_control_mode}",
-            ],
-            setup_deadline,
-        )?;
-        let (client, pane) = choose_target(&panes, &clients, original)?;
+        let setup_deadline = deadline.min(Instant::now() + POPUP_SETUP_TIMEOUT);
+        let (client, pane) = locate_target(config, original, setup_deadline)?;
         let directory = PrivateDir::new()?;
         let socket = directory.0.join("control");
         let listener = UnixListener::bind(&socket).map_err(|_| "cannot bind private socket")?;
@@ -473,69 +461,94 @@ impl Popup {
                 .spawn()
                 .map_err(|_| "cannot start popup")?,
         );
-        let connection = loop {
-            if command
-                .0
-                .try_wait()
-                .map_err(|_| "cannot wait for popup")?
-                .is_some()
-            {
-                return Err("tmux popup failed or was closed");
-            }
-            check(setup_deadline)?;
-            match listener.accept() {
-                Ok((stream, _)) => break stream,
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    // Recheck the popup process even if it never connects.
-                    let mut fds = [
-                        libc::pollfd {
-                            fd: listener.as_raw_fd(),
-                            events: libc::POLLIN,
-                            revents: 0,
-                        },
-                        libc::pollfd {
-                            fd: 0,
-                            events: 0,
-                            revents: 0,
-                        },
-                    ];
-                    unsafe {
-                        libc::poll(fds.as_mut_ptr(), 2, 50);
-                    }
-                    if fds[1].revents != 0 {
-                        return Err("agent disconnected during popup setup");
-                    }
-                }
-                Err(_) => return Err("cannot accept popup connection"),
-            }
-        };
-        verify_peer(&connection, None)?;
-        nonblocking(connection.as_raw_fd())?;
-        let mut line = Line::new();
-        if !line.read(connection.as_raw_fd(), setup_deadline, &[0])? {
-            return Err("popup closed during setup");
-        }
-        let text = std::str::from_utf8(line.data())
-            .map_err(|_| "invalid popup metadata")?
-            .trim_end();
-        let (tty, term) = text.split_once('\t').ok_or("invalid popup metadata")?;
-        let tty = checked_tty(tty.as_bytes())?;
-        if term.is_empty()
-            || term.len() > 128
-            || !term
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"-_.+".contains(&b))
-        {
-            return Err("invalid popup terminal type");
-        }
+        let connection = accept_popup(&listener, &mut command.0, setup_deadline)?;
+        let (tty, term) = read_popup_terminal(&connection, setup_deadline)?;
         Ok(Self {
             connection,
             _command: command,
             _directory: directory,
             tty,
-            term: term.into(),
+            term,
         })
     }
+}
+
+fn locate_target(config: &Config, original: &str, deadline: Instant) -> Result<(String, String)> {
+    let panes = query(
+        config,
+        &[
+            "list-panes",
+            "-a",
+            "-F",
+            "#{pane_tty}\t#{pane_id}\t#{session_id}",
+        ],
+        deadline,
+    )?;
+    let clients = query(
+        config,
+        &[
+            "list-clients",
+            "-F",
+            "#{client_name}\t#{session_id}\t#{client_control_mode}",
+        ],
+        deadline,
+    )?;
+    choose_target(&panes, &clients, original)
+}
+
+fn accept_popup(
+    listener: &UnixListener,
+    command: &mut Child,
+    deadline: Instant,
+) -> Result<UnixStream> {
+    loop {
+        if command
+            .try_wait()
+            .map_err(|_| "cannot wait for popup")?
+            .is_some()
+        {
+            return Err("tmux popup failed or was closed");
+        }
+        check_deadline(deadline)?;
+        match listener.accept() {
+            Ok((stream, _)) => {
+                verify_peer(&stream, None)?;
+                return Ok(stream);
+            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                // One bounded poll lets us recheck the process if it exits
+                // without ever connecting, instead of waiting until timeout.
+                poll_once(listener.as_raw_fd(), libc::POLLIN, deadline, &[0])?;
+            }
+            Err(_) => return Err("cannot accept popup connection"),
+        }
+    }
+}
+
+fn read_popup_terminal(connection: &UnixStream, deadline: Instant) -> Result<(String, String)> {
+    nonblocking(connection.as_raw_fd())?;
+    let mut line = Line::new();
+    if !line.read(connection.as_raw_fd(), deadline, &[0])? {
+        return Err("popup closed during setup");
+    }
+    validate_popup_terminal(line.data())
+}
+
+fn validate_popup_terminal(data: &[u8]) -> Result<(String, String)> {
+    let text = std::str::from_utf8(data)
+        .map_err(|_| "invalid popup metadata")?
+        .trim_end();
+    let (tty, term) = text.split_once('\t').ok_or("invalid popup metadata")?;
+    let tty = checked_tty(tty.as_bytes())?;
+    if term.is_empty()
+        || term.len() > 128
+        || !term
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_.+".contains(&b))
+    {
+        return Err("invalid popup terminal type");
+    }
+    Ok((tty, term.into()))
 }
 
 fn verify_peer(stream: &UnixStream, expected_pid: Option<u32>) -> Result<()> {
@@ -565,7 +578,7 @@ fn helper(args: &[String]) -> Result<()> {
     }
     let pid: u32 = args[1].parse().map_err(|_| "invalid parent PID")?;
     let seconds: u64 = args[2].parse().map_err(|_| "invalid timeout")?;
-    if !(1..=3600).contains(&seconds) {
+    if !VALID_TIMEOUT_SECS.contains(&seconds) {
         return Err("invalid timeout");
     }
     let mut tty = [0 as libc::c_char; 256];
@@ -582,7 +595,7 @@ fn helper(args: &[String]) -> Result<()> {
     writeln!(connection, "{tty}\t{term}").map_err(|_| "cannot send popup terminal")?;
     nonblocking(connection.as_raw_fd())?;
     let deadline = Instant::now() + Duration::from_secs(seconds);
-    wait(connection.as_raw_fd(), libc::POLLIN, deadline, &[])?;
+    poll_ready(connection.as_raw_fd(), libc::POLLIN, deadline, &[])?;
     // The parent only closes the socket. No input/secret is ever sent here.
     Ok(())
 }
@@ -626,41 +639,56 @@ impl Backend {
     fn send(&self, line: &[u8], deadline: Instant, guards: &[RawFd]) -> Result<()> {
         write_bytes(self.input.as_raw_fd(), line, deadline, guards)
     }
-    fn response(&self, deadline: Instant, guards: &[RawFd], forward: bool) -> Result<bool> {
+    fn relay_reply(&self, deadline: Instant, guards: &[RawFd]) -> Result<bool> {
         let mut line = Line::new();
         loop {
             if !line.read(self.output.as_raw_fd(), deadline, guards)? {
                 return Err("curses backend exited");
             }
-            if forward {
-                write_bytes(1, line.data(), deadline, guards)?;
-            }
+            write_bytes(1, line.data(), deadline, guards)?;
             if keyword(line.data(), b"INQUIRE") {
-                if !forward {
-                    return Err("unexpected backend inquiry");
-                }
-                let mut answer = Line::new();
-                loop {
-                    if !answer.read(0, deadline, guards)? {
-                        return Err("agent disconnected during inquiry");
-                    }
-                    self.send(answer.data(), deadline, guards)?;
-                    if keyword(answer.data(), b"END") || keyword(answer.data(), b"CAN") {
-                        break;
-                    }
-                }
+                self.relay_inquiry_answer(deadline, guards)?;
             }
-            if terminal(line.data()) {
+            if is_final_reply(line.data()) {
                 return Ok(keyword(line.data(), b"OK"));
             }
         }
     }
+
+    fn relay_inquiry_answer(&self, deadline: Instant, guards: &[RawFd]) -> Result<()> {
+        let mut answer = Line::new();
+        loop {
+            if !answer.read(0, deadline, guards)? {
+                return Err("agent disconnected during inquiry");
+            }
+            self.send(answer.data(), deadline, guards)?;
+            if keyword(answer.data(), b"END") || keyword(answer.data(), b"CAN") {
+                return Ok(());
+            }
+        }
+    }
+
+    fn expect_ok_reply(&self, deadline: Instant, guards: &[RawFd]) -> Result<()> {
+        let mut line = Line::new();
+        loop {
+            if !line.read(self.output.as_raw_fd(), deadline, guards)? {
+                return Err("curses backend exited");
+            }
+            if keyword(line.data(), b"INQUIRE") {
+                return Err("unexpected backend inquiry");
+            }
+            if keyword(line.data(), b"ERR") {
+                return Err("backend rejected popup terminal");
+            }
+            if keyword(line.data(), b"OK") {
+                return Ok(());
+            }
+        }
+    }
+
     fn setup(&self, command: &[u8], deadline: Instant, guards: &[RawFd]) -> Result<()> {
         self.send(command, deadline, guards)?;
-        if !self.response(deadline, guards, false)? {
-            return Err("backend rejected popup terminal");
-        }
-        Ok(())
+        self.expect_ok_reply(deadline, guards)
     }
 }
 
@@ -684,7 +712,7 @@ fn run(config: Config) -> Result<()> {
         backend: Backend::start(&config)?,
         popup: None,
     };
-    if !session.backend.response(deadline, &[0], true)? {
+    if !session.backend.relay_reply(deadline, &[0])? {
         return Err("backend rejected startup");
     }
     let mut original = config.original_tty.clone();
@@ -701,7 +729,7 @@ fn run(config: Config) -> Result<()> {
         if line.data().trim_ascii().is_empty() || line.data().starts_with(b"#") {
             continue;
         }
-        if let Some(tty) = option(line.data(), b"ttyname") {
+        if let Some(tty) = parse_option(line.data(), b"ttyname") {
             if session.popup.is_some() {
                 return Err("cannot retarget an active popup");
             }
@@ -711,12 +739,15 @@ fn run(config: Config) -> Result<()> {
         }
         // Keep terminal routing under this proxy's control. Display is irrelevant
         // to curses, and enabling an Emacs prompt would bypass the popup.
-        if option(line.data(), b"ttytype").is_some() || option(line.data(), b"display").is_some() {
+        if parse_option(line.data(), b"ttytype").is_some()
+            || parse_option(line.data(), b"display").is_some()
+        {
             write_bytes(1, b"OK\n", deadline, &guards)?;
             continue;
         }
-        if option(line.data(), b"allow-emacs-prompt").is_some() {
-            write_bytes(1, b"ERR 83886254 unsupported option\n", deadline, &guards)?;
+        if parse_option(line.data(), b"allow-emacs-prompt").is_some() {
+            let reply = format!("ERR {GPG_ERR_UNKNOWN_OPTION} unsupported option\n");
+            write_bytes(1, reply.as_bytes(), deadline, &guards)?;
             continue;
         }
         let show = [b"GETPIN".as_slice(), b"CONFIRM", b"MESSAGE"]
@@ -743,7 +774,7 @@ fn run(config: Config) -> Result<()> {
         let mut guards = vec![0];
         guards.extend(session.popup.iter().map(|p| p.connection.as_raw_fd()));
         session.backend.send(line.data(), deadline, &guards)?;
-        session.backend.response(deadline, &guards, true)?;
+        session.backend.relay_reply(deadline, &guards)?;
         if keyword(line.data(), b"BYE") {
             return Ok(());
         }
@@ -797,6 +828,126 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::fd::{FromRawFd, OwnedFd};
+
+    fn test_terminal() -> (OwnedFd, OwnedFd, Vec<u8>) {
+        let mut master = -1;
+        let mut slave = -1;
+        assert_eq!(
+            unsafe {
+                libc::openpty(
+                    &mut master,
+                    &mut slave,
+                    std::ptr::null_mut(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                )
+            },
+            0
+        );
+        let master = unsafe { OwnedFd::from_raw_fd(master) };
+        let slave = unsafe { OwnedFd::from_raw_fd(slave) };
+        let mut name = [0 as libc::c_char; 256];
+        assert_eq!(
+            unsafe { libc::ttyname_r(slave.as_raw_fd(), name.as_mut_ptr(), name.len()) },
+            0
+        );
+        let name = unsafe { std::ffi::CStr::from_ptr(name.as_ptr()) }
+            .to_bytes()
+            .to_vec();
+        (master, slave, name)
+    }
+
+    #[test]
+    fn checked_tty_accepts_an_owned_pseudoterminal() {
+        let (_master, _slave, name) = test_terminal();
+        assert_eq!(checked_tty(&name).unwrap().as_bytes(), name);
+    }
+
+    #[test]
+    fn checked_tty_rejects_invalid_or_missing_terminals() {
+        for value in [
+            b"".as_slice(),
+            b"/dev/null",
+            b"/dev/pts/",
+            b"/dev/pts/-1",
+            b"/dev/pts/../0",
+            b"/dev/pts/0/extra",
+            b"/dev/pts/\xff",
+            b"/dev/pts/999999999999",
+        ] {
+            assert!(checked_tty(value).is_err());
+        }
+    }
+
+    #[test]
+    fn popup_terminal_metadata_accepts_an_owned_terminal_and_type() {
+        let (_master, _slave, name) = test_terminal();
+        let mut metadata = name.clone();
+        metadata.extend_from_slice(b"\txterm-256color\n");
+        let (tty, term) = validate_popup_terminal(&metadata).unwrap();
+        assert_eq!(tty.as_bytes(), name);
+        assert_eq!(term, "xterm-256color");
+    }
+
+    #[test]
+    fn popup_terminal_metadata_rejects_invalid_input() {
+        for data in [
+            b"".as_slice(),
+            b"\xff",
+            b"/dev/pts/0",
+            b"/dev/null\txterm\n",
+        ] {
+            assert!(validate_popup_terminal(data).is_err());
+        }
+        let (_master, _slave, name) = test_terminal();
+        for term in [
+            "",
+            "../../xterm",
+            "xterm\tother",
+            "\x1b[31m",
+            &"x".repeat(129),
+        ] {
+            let mut metadata = name.clone();
+            metadata.push(b'\t');
+            metadata.extend_from_slice(term.as_bytes());
+            assert!(validate_popup_terminal(&metadata).is_err());
+        }
+    }
+
+    #[test]
+    fn option_parser_rejects_other_commands_and_keys() {
+        for line in [
+            b"OPTION ttynamex=/dev/pts/0\n".as_slice(),
+            b"OPTION --ttynamex=/dev/pts/0\n",
+            b"OPTION TTYNAME=/dev/pts/0\n",
+            b"OPTION display=:0\n",
+            b"OPTIONAL ttyname=/dev/pts/0\n",
+            b"GETPIN ttyname=/dev/pts/0\n",
+        ] {
+            assert!(parse_option(line, b"ttyname").is_none());
+        }
+    }
+
+    #[test]
+    fn config_accepts_equals_form_arguments() {
+        let args = [
+            "--backend=/usr/bin/pinentry-curses",
+            "--tmux-program=/usr/bin/tmux",
+            "--tmux-socket=/tmp/test-server",
+            "--session-timeout=12",
+            "--display=:0",
+        ]
+        .map(String::from);
+        let config = Config::parse(&args).unwrap();
+        assert_eq!(config.backend, Path::new("/usr/bin/pinentry-curses"));
+        assert_eq!(config.tmux, Path::new("/usr/bin/tmux"));
+        assert_eq!(
+            config.socket.as_deref(),
+            Some(Path::new("/tmp/test-server"))
+        );
+        assert_eq!(config.timeout, Duration::from_secs(12));
+    }
     #[test]
     fn targets_only_the_original_session() {
         let panes = "/dev/pts/4\t%1\t$1\n/dev/pts/5\t%2\t$2\n";
@@ -827,16 +978,19 @@ mod tests {
     fn protocol_keywords_have_boundaries() {
         assert!(keyword(b"CONFIRM --one-button\n", b"CONFIRM"));
         assert!(!keyword(b"GETPINOTHER\n", b"GETPIN"));
-        assert!(!terminal(b"OKAY\n"));
+        assert!(!is_final_reply(b"OKAY\n"));
         assert_eq!(
-            option(b"OPTION ttyname=/dev/pts/4\n", b"ttyname"),
+            parse_option(b"OPTION ttyname=/dev/pts/4\n", b"ttyname"),
             Some(b"/dev/pts/4".as_slice())
         );
         for line in [
             b"option\t --ttyname = /dev/pts/4 \n".as_slice(),
             b"OPTION ttyname /dev/pts/4\n",
         ] {
-            assert_eq!(option(line, b"ttyname"), Some(b"/dev/pts/4".as_slice()));
+            assert_eq!(
+                parse_option(line, b"ttyname"),
+                Some(b"/dev/pts/4".as_slice())
+            );
         }
     }
     #[test]

@@ -15,6 +15,9 @@ for raw in sys.stdin.buffer:
     keyword, separator, rest = line.partition(b" ")
     line = keyword.upper() + separator + rest
     if line.startswith(b"OPTION ttyname="):
+        if scenario.get("reject_tty"):
+            print("ERR 83886254 untrusted backend reason", flush=True)
+            continue
         tty = line.split(b"=", 1)[1].decode()
     if line == b"GETPIN":
         assert tty and tty != scenario["tty"] and tty.startswith("/dev/pts/")

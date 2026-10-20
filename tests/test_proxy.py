@@ -40,13 +40,21 @@ class ProxyTests(unittest.TestCase):
         os.close(self.slave)
         self.temp.cleanup()
 
-    def start(self, timeout=4, **scenario):
+    def start(self, timeout=4, *, tmux_socket=None, **scenario):
+        if tmux_socket is not None:
+            scenario["expected_socket"] = str(tmux_socket)
         (self.directory / "scenario.json").write_text(json.dumps({"tty": self.tty, **scenario}))
         env = {**os.environ, "TEST_ENV_SECRET": "do-not-forward-this"}
+        options = [("--backend", str(self.directory / "fake_pinentry.py")),
+                   ("--tmux-program", str(self.directory / "fake_tmux.py")),
+                   ("--session-timeout", str(timeout))]
+        if tmux_socket is not None:
+            options.append(("--tmux-socket", str(tmux_socket)))
+        args = [str(BINARY)]
+        for key, value in options:
+            args.extend([key, value])
         self.process = subprocess.Popen(
-            [str(BINARY), "--backend", str(self.directory / "fake_pinentry.py"),
-             "--tmux-program", str(self.directory / "fake_tmux.py"),
-             "--session-timeout", str(timeout)],
+            args,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
             bufsize=0)
         self.assertEqual(self.line(), b"OK dummy pinentry\n")
@@ -98,6 +106,23 @@ class ProxyTests(unittest.TestCase):
         self.assertEqual(args[args.index("-t") + 1], "%1")
         self.assertNotIn("do-not-forward-this", str(args))
         self.finish()
+
+    def test_nondefault_tmux_socket_is_used(self):
+        self.start(tmux_socket=self.directory / "tmux-server")
+        self.setup_tty()
+        self.send(b"GETPIN\n")
+        self.assertEqual(self.line(), b"D dummy%25secret\n")
+        self.assertEqual(self.line(), b"OK\n")
+        self.finish()
+
+    def test_internal_setup_reply_is_not_relayed_to_the_agent(self):
+        self.start(reject_tty=True)
+        self.setup_tty()
+        self.send(b"GETPIN\n")
+        self.assertEqual(self.line(), b"ERR 83886179 pinentry-tmux: backend rejected popup terminal\n")
+        stdout, stderr = self.process.communicate(timeout=2)
+        self.assertNotIn(b"untrusted backend reason", stdout + stderr)
+        self.assertEqual(self.process.returncode, 1)
 
     def test_inquiries_are_forwarded_bidirectionally(self):
         self.start(inquire=True)
