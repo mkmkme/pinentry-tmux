@@ -1,0 +1,118 @@
+# pinentry-tmux
+
+A small Linux/Rust proxy that runs `/usr/bin/pinentry-curses` in a separate,
+explicitly targeted tmux popup. Intended to avoid pinentry corrupting an
+OpenCode (or other full-screen application's) terminal.
+
+Independently written, informed by the design and pitfalls of
+[eth-p/pinentry-tmux](https://github.com/eth-p/pinentry-tmux) and the
+[tmux popup pinentry article](https://zenn.dev/ngicks/articles/pinentry-in-tmux-popup).
+No source code from those projects is incorporated.
+
+## Requirements
+
+- Linux, tmux with popup support (tested: 3.4), and curses pinentry
+  (tested: 1.2.1).
+- Rust stable (**1.99.1** here), selected in `rust-toolchain.toml`, to build. One dependency:
+  `libc`, pinned through `Cargo.lock`. The executable needs no Rust installation
+  or Python runtime. It dynamically links the system C library.
+- `just` for build recipes; Python 3 and GnuPG for tests only.
+- GPG must supply `OPTION ttyname` naming the signing shell's tmux pane.
+  Normally this comes from `export GPG_TTY="$(tty)"` in that shell.
+- Exactly **one non-control client** must be attached across the sessions
+  containing that pane. Ambiguous or detached sessions fail closed.
+
+## Build, test, install
+
+```sh
+just test
+just test-real
+just install
+```
+
+The real tests create a **disposable** passphrase-protected signing key, a
+separate GPG home/agent, an isolated tmux server, and a pseudo-terminal client.
+They verify signing, cached signing without another prompt, Ctrl+C cancellation,
+and client disconnects. They do not use your existing keys, agent, or tmux server.
+Test-only key passphrases are deliberately public dummy data.
+
+`just install` installs `~/.local/bin/pinentry-tmux` and does **not** change
+GPG configuration. To install elsewhere: `just install /absolute/destination`.
+
+After testing, manually replace the existing `pinentry-program` directive in
+`~/.gnupg/gpg-agent.conf` with your absolute installed path (replace the
+placeholder below):
+
+```conf
+pinentry-program /absolute/path/to/pinentry-tmux
+```
+
+Then run `gpgconf --reload gpg-agent`. Keep a copy of your old directive so you
+can restore it and reload the agent to revert. Do not add multiple directives.
+
+**This is a tmux-only pinentry.** Because the agent configuration is global,
+uncached operations outside tmux will also fail. It never automatically falls
+back to drawing on another terminal or silently skips commit signing.
+
+### Options / non-default tmux server
+
+```text
+--backend /absolute/path       default: /usr/bin/pinentry-curses
+--tmux-program /absolute/path  default: /usr/bin/tmux
+--tmux-socket /absolute/path   default: tmux's default server socket
+--session-timeout SECONDS      default: 300, allowed: 1..3600
+```
+
+`gpg-agent.conf`'s `pinentry-program` accepts a path, not a shell command. If you
+need options (for example `tmux -L work` or `tmux -S ...`), point it at a small
+launcher containing an `exec` of the installed binary with the appropriate
+`--tmux-socket /absolute/server/socket` argument. Run
+`tmux display-message -p '#{socket_path}'` inside your tmux session to obtain it.
+The wrapper deliberately does not trust an inherited, potentially stale `TMUX`
+variable from a long-running GPG agent.
+
+If OpenCode runs tool commands through a background service, verify that **its
+GPG request** supplies the correct `GPG_TTY`. Setting it in an unrelated shell
+does not necessarily update a running service. Missing or stale terminal
+information is not guessed. Real GPG tests are not proof of end-to-end behavior
+in every OpenCode service setup.
+
+## Design and security boundaries
+
+1. Start the fixed curses backend on anonymous stdin/stdout pipes, initially
+   pointing at `/dev/null` so it cannot draw on the original terminal.
+2. Relay Assuan commands/replies and bidirectional inquiries. Intercept terminal
+   routing options, including Assuan's optional `--`/`=` syntax and command
+   case-insensitivity. Reject Emacs redirection. No protocol debugging/logging.
+3. On the first GETPIN, CONFIRM, or MESSAGE, locate the original tty's pane and
+   its unique attached client. Explicitly target both client and pane.
+4. Atomically create a mode-0700 directory and mode-0600 Unix socket. The popup
+   helper exchanges **only terminal metadata**, never passphrases. Linux peer
+   credentials verify the UID; the helper also verifies the parent PID.
+5. Direct curses to the popup terminal. Passphrase replies stay on anonymous
+   pipes between backend, proxy, and agent: not disk, argv, environment, or
+   the tmux control channel. Obviously, curses display/input uses tmux itself.
+6. Bound setup to 10 seconds and the whole session to 300 seconds by default.
+   Cancellation, signals, pipe EOF, and popup disconnects stop the session.
+   Kill/reap the backend before releasing the popup, avoiding late terminal
+   writes. Linux parent-death signalling also kills the backend if the proxy
+   is forcibly killed.
+
+The wrapper forwards no bulk environment to tmux command arguments. Child
+commands get a minimal environment (`PATH`, `LANG`, and `HOME`); the popup helper
+itself starts with tmux's normal session environment. Locale configuration from
+GPG is relayed to curses. Executable paths must be absolute. No shell is used
+to construct the popup command.
+
+Core dumps are disabled; Linux dumpability is disabled in the proxy/helper;
+fixed protocol buffers are wiped with volatile writes before reuse and drop.
+**These are mitigations, not secure-memory guarantees:** buffers are not locked
+against swap, and the compiler/OS may retain copies. Root, a compromised account,
+an untrusted backend, a compromised tmux server, or another client with access to
+the session remain outside the protection boundary. Anyone sharing a tmux
+session can potentially observe keystrokes; do not share sessions used for
+passphrase entry. SIGKILL can leave an empty/private metadata socket directory;
+normal shutdown and handled signals remove it. No passphrases are stored there.
+
+This is new code with automated tests, **not a security-audited replacement for
+GnuPG/pinentry**. Verify it with disposable credentials before using real ones.

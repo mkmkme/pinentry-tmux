@@ -1,0 +1,16 @@
+[package]
+name = "pinentry-tmux"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+description = "Run curses pinentry in an explicitly targeted tmux popup"
+license = "MIT"
+
+[dependencies]
+libc = "0.2.180"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+panic = "abort"
