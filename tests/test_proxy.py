@@ -394,6 +394,15 @@ class ProxyTests(unittest.TestCase):
         self.assertNotIn(b"untrusted text", stderr)
         self.assertFalse((self.directory / "popup-args.json").exists())
 
+    def test_unknown_cli_option_is_rejected_as_greeting(self):
+        self.start(extra_args=["--debug"],
+                   greeting=b"ERR 83886179 pinentry-tmux: unsupported command-line option\n")
+        self.process.wait(timeout=2)
+        stdout, stderr = self.process.communicate(timeout=2)
+        self.assertEqual(self.process.returncode, 1)
+        self.assertEqual(stdout, b"")
+        self.assertEqual(stderr, b"pinentry-tmux: unsupported command-line option\n")
+
     def test_backend_error_greeting_is_relayed_only_once(self):
         self.start(startup_error=True, greeting=b"ERR 83886254 backend startup rejected\n")
         self.process.wait(timeout=2)

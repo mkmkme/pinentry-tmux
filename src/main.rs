@@ -76,27 +76,33 @@ impl Config {
             let (name, inline) = args[i]
                 .split_once('=')
                 .map_or((args[i].as_str(), None), |(k, v)| (k, Some(v)));
-            let value = match inline {
-                Some(value) => value,
+            // Only recognized options consume a value, so a trailing unknown
+            // option has the same diagnostic as one followed by an argument.
+            let mut value = || match inline {
+                Some(value) => Ok(value),
                 None => {
                     i += 1;
-                    args.get(i).ok_or("missing option value")?
+                    args.get(i)
+                        .map(String::as_str)
+                        .ok_or("missing option value")
                 }
             };
             match name {
-                "--backend" => config.backend = value.into(),
-                "--tmux-program" => config.tmux = value.into(),
-                "--tmux-socket" => config.socket = Some(value.into()),
+                "--backend" => config.backend = value()?.into(),
+                "--tmux-program" => config.tmux = value()?.into(),
+                "--tmux-socket" => config.socket = Some(value()?.into()),
                 "--session-timeout" => {
-                    let seconds: u64 = value.parse().map_err(|_| "invalid timeout")?;
+                    let seconds: u64 = value()?.parse().map_err(|_| "invalid timeout")?;
                     if !VALID_TIMEOUT_SECS.contains(&seconds) {
                         return Err("timeout must be 1..3600 seconds");
                     }
                     config.timeout = Duration::from_secs(seconds);
                 }
-                "--ttyname" => config.original_tty = Some(checked_tty(value.as_bytes())?),
+                "--ttyname" => config.original_tty = Some(checked_tty(value()?.as_bytes())?),
                 // gpg-agent can supply --display. Never pass it to curses.
-                "--display" | "--ttytype" | "--lc-ctype" | "--lc-messages" => (),
+                "--display" | "--ttytype" | "--lc-ctype" | "--lc-messages" => {
+                    value()?;
+                }
                 _ => return Err("unsupported command-line option"),
             }
             i += 1;
@@ -1057,6 +1063,38 @@ mod tests {
         ] {
             assert!(
                 Config::parse(&args.into_iter().map(String::from).collect::<Vec<_>>()).is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn config_distinguishes_unknown_options_from_missing_values() {
+        for args in [
+            vec!["--debug"],
+            vec!["--debug", "1"],
+            vec!["--debug=1"],
+            vec!["--unknown"],
+        ] {
+            let args = args.into_iter().map(String::from).collect::<Vec<_>>();
+            assert_eq!(
+                Config::parse(&args).err(),
+                Some("unsupported command-line option")
+            );
+        }
+        for name in [
+            "--backend",
+            "--tmux-program",
+            "--tmux-socket",
+            "--session-timeout",
+            "--ttyname",
+            "--display",
+            "--ttytype",
+            "--lc-ctype",
+            "--lc-messages",
+        ] {
+            assert_eq!(
+                Config::parse(&[name.to_owned()]).err(),
+                Some("missing option value")
             );
         }
     }
