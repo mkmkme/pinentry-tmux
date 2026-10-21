@@ -640,13 +640,23 @@ impl Backend {
     fn send(&self, line: &[u8], deadline: Instant, guards: &[RawFd]) -> Result<()> {
         write_bytes(self.input.as_raw_fd(), line, deadline, guards)
     }
-    fn relay_reply(&self, deadline: Instant, guards: &[RawFd]) -> Result<bool> {
+    fn relay_reply(
+        &self,
+        deadline: Instant,
+        guards: &[RawFd],
+        agent_finished: bool,
+    ) -> Result<bool> {
         let mut line = Line::new();
         loop {
             if !line.read(self.output.as_raw_fd(), deadline, guards)? {
                 return Err("curses backend exited");
             }
-            write_bytes(1, line.data(), deadline, guards)?;
+            match write_bytes(1, line.data(), deadline, guards) {
+                // After BYE the agent need not wait for our reply. Only its
+                // output disconnect is harmless; preserve all other failures.
+                Err("output disconnected" | "closed output") if agent_finished => (),
+                result => result?,
+            }
             if keyword(line.data(), b"INQUIRE") {
                 self.relay_inquiry_answer(deadline, guards)?;
             }
@@ -713,7 +723,7 @@ fn run(config: Config) -> Result<()> {
         backend: Backend::start(&config)?,
         popup: None,
     };
-    if !session.backend.relay_reply(deadline, &[0])? {
+    if !session.backend.relay_reply(deadline, &[0], false)? {
         return Err(STARTUP_REJECTED);
     }
     let mut original = config.original_tty.clone();
@@ -772,13 +782,17 @@ fn run(config: Config) -> Result<()> {
                 &guards,
             )?;
         }
+        if keyword(line.data(), b"BYE") {
+            // gpg-agent can send BYE and close both pipes immediately. Keep
+            // watching the popup, but no longer treat agent EOF as cancellation.
+            session.backend.send(line.data(), deadline, &guards)?;
+            session.backend.relay_reply(deadline, &guards, true)?;
+            return Ok(());
+        }
         let mut guards = vec![0];
         guards.extend(session.popup.iter().map(|p| p.connection.as_raw_fd()));
         session.backend.send(line.data(), deadline, &guards)?;
-        session.backend.relay_reply(deadline, &guards)?;
-        if keyword(line.data(), b"BYE") {
-            return Ok(());
-        }
+        session.backend.relay_reply(deadline, &guards, false)?;
     }
 }
 

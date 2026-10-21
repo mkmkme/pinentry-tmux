@@ -17,6 +17,14 @@ for raw in sys.stdin.buffer:
     line = raw.rstrip(b"\r\n")
     keyword, separator, rest = line.partition(b" ")
     line = keyword.upper() + separator + rest
+    if line == b"BYE":
+        if scenario.get("bye_eof"):
+            sys.exit(0)
+        if scenario.get("bye_error"):
+            print("ERR 83886179 backend shutdown rejected", flush=True)
+            break
+        if scenario.get("bye_stall"):
+            time.sleep(30)
     if line.startswith(b"OPTION ttyname="):
         if scenario.get("reject_tty"):
             print("ERR 83886254 untrusted backend reason", flush=True)

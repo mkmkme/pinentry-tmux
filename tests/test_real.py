@@ -37,10 +37,12 @@ class RealTests(unittest.TestCase):
         self.master = None
         self.slave = None
         self.addCleanup(self.cleanup)
+        self.pinentry_log = self.directory / "pinentry.stderr"
         launcher = self.directory / "pinentry"
+        # Keep exec in the launcher so signals still reach the proxy directly.
         launcher.write_text("#!/bin/sh\nexec " + shlex.join([
             str(BINARY), "--tmux-socket", str(self.socket), "--session-timeout", "20"
-        ]) + ' "$@"\n')
+        ]) + ' "$@" 2>>' + shlex.quote(str(self.pinentry_log)) + '\n')
         launcher.chmod(0o700)
         (self.home / "gpg-agent.conf").write_text(f"pinentry-program {launcher}\n")
         self.gpg("--batch", "--pinentry-mode", "loopback", "--passphrase", "disposable-test-only",
@@ -127,10 +129,14 @@ class RealTests(unittest.TestCase):
         self.until(status.exists)
         self.assertEqual(status.read_text().strip(), "0", log.read_text())
         self.gpg("--verify", str(output))
+        # A successful signature alone does not prove clean pinentry shutdown.
+        self.assertEqual(self.pinentry_log.read_bytes(), b"")
         output2, status2, log2 = self.start_sign("cached")
         self.until(status2.exists)
         self.assertEqual(status2.read_text().strip(), "0", log2.read_text())
         self.gpg("--verify", str(output2))
+        # Cached signing starts no pinentry; an unchanged empty log is expected.
+        self.assertEqual(self.pinentry_log.read_bytes(), b"")
         self.assertTrue(self.tmux("list-clients").stdout.strip())
 
     def test_real_pinentry_cancellation(self):

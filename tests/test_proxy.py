@@ -107,6 +107,69 @@ class ProxyTests(unittest.TestCase):
         self.assertNotIn("do-not-forward-this", str(args))
         self.finish()
 
+    def check_bye_with_closed_agent(self, *, popup, close_output):
+        self.start()
+        if popup:
+            self.setup_tty()
+            self.send(b"GETPIN\n")
+            self.assertEqual(self.line(), b"D dummy%25secret\n")
+            self.assertEqual(self.line(), b"OK\n")
+        if close_output:
+            self.process.stdout.close()
+            self.process.stdout = None
+        self.send(b"bYe\n")
+        self.process.stdin.close()
+        self.process.stdin = None
+        stdout, stderr = self.process.communicate(timeout=3)
+        self.assertEqual(self.process.returncode, 0, stderr)
+        self.assertEqual(stderr, b"")
+        if not close_output:
+            self.assertEqual(stdout, b"OK\n")
+        if popup:
+            args = json.loads((self.directory / "popup-args.json").read_text())
+            socket = Path(args[args.index("--popup") + 1])
+            self.assertFalse(socket.parent.exists(), "leaked private socket directory")
+
+    def test_bye_with_closed_stdin(self):
+        self.check_bye_with_closed_agent(popup=False, close_output=False)
+
+    def test_bye_with_both_agent_pipes_closed(self):
+        self.check_bye_with_closed_agent(popup=False, close_output=True)
+
+    def test_bye_with_closed_stdin_after_popup(self):
+        self.check_bye_with_closed_agent(popup=True, close_output=False)
+
+    def test_bye_with_both_agent_pipes_closed_after_popup(self):
+        self.check_bye_with_closed_agent(popup=True, close_output=True)
+
+    def test_bye_backend_eof_is_an_error(self):
+        self.start(bye_eof=True)
+        self.send(b"BYE\n")
+        self.assertEqual(self.line(), b"ERR 83886179 pinentry-tmux: curses backend exited\n")
+        _, stderr = self.process.communicate(timeout=3)
+        self.assertEqual(self.process.returncode, 1)
+        self.assertEqual(stderr, b"pinentry-tmux: curses backend exited\n")
+
+    def test_bye_backend_error_is_preserved(self):
+        self.start(bye_error=True)
+        self.send(b"BYE\n")
+        self.assertEqual(self.line(), b"ERR 83886179 backend shutdown rejected\n")
+        stdout, stderr = self.process.communicate(timeout=3)
+        self.assertEqual(self.process.returncode, 0, stderr)
+        self.assertEqual(stdout, b"")
+        self.assertEqual(stderr, b"")
+
+    def test_bye_with_closed_agent_still_times_out(self):
+        self.start(timeout=1, bye_stall=True)
+        self.send(b"BYE\n")
+        self.process.stdin.close()
+        self.process.stdin = None
+        self.process.stdout.close()
+        self.process.stdout = None
+        _, stderr = self.process.communicate(timeout=3)
+        self.assertEqual(self.process.returncode, 1)
+        self.assertEqual(stderr, b"pinentry-tmux: session timed out\n")
+
     def test_nondefault_tmux_socket_is_used(self):
         self.start(tmux_socket=self.directory / "tmux-server")
         self.setup_tty()
