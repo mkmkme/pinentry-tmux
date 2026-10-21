@@ -100,6 +100,10 @@ launcher containing an `exec` of the installed binary with the appropriate
 The wrapper deliberately does not trust an inherited, potentially stale `TMUX`
 variable from a long-running GPG agent.
 
+Tmux queries run with a cleared environment, so default socket lookup uses
+tmux's standard directory and ignores `TMUX_TMPDIR`. For a server using a custom
+socket directory, supply `--tmux-socket` explicitly as described above.
+
 ### Unsupported popup setups
 
 - Signing from a shell inside another tmux popup is unsupported: its terminal
